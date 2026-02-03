@@ -1990,6 +1990,12 @@ class ControllerKey(ControllerInput):
         else:
             rgb_image.close()
 
+        # Skip GUI updates when screensaver is active - the GUI should continue
+        # showing the page buttons while only the hardware shows the screensaver
+        if self.deck_controller.screen_saver.showing:
+            image.close()
+            return
+
         # Pass image to UI - the UI code will handle closing it after conversion to pixbuf
         self.set_ui_key_image(image)
 
@@ -2318,7 +2324,7 @@ class ControllerTouchScreen(ControllerInput):
 
     def update(self) -> None:
         image = self.get_current_image()
-        
+
         # Touchscreen only supports JPEG, so composite RGBA onto background
         if image.mode == "RGBA":
             # Create a background image (black by default)
@@ -2326,9 +2332,13 @@ class ControllerTouchScreen(ControllerInput):
             # Composite the RGBA image onto the RGB background
             background.paste(image, (0, 0), image)
             image = background
-        
+
         native_image = PILHelper.to_native_touchscreen_format(self.deck_controller.deck, image)
         self.deck_controller.media_player.add_touchscreen_task(native_image)
+
+        # Skip GUI updates when screensaver is active
+        if self.deck_controller.screen_saver.showing:
+            return
 
         self.set_ui_image(self.get_current_image())
 
