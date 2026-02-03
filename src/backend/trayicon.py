@@ -345,20 +345,34 @@ class StatusNotifierItemService(DBusService):
         self.Menu = self._menu.dbus_path
 
     def register(self):
-        self._menu.register()
-        super().register()
+        try:
+            self._menu.register()
+            super().register()
 
-        watcher = Gio.DBusProxy.new_sync(
-            connection=self.bus,
-            flags=Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES,
-            info=None,
-            name='org.kde.StatusNotifierWatcher',
-            object_path='/StatusNotifierWatcher',
-            interface_name='org.kde.StatusNotifierWatcher',
-            cancellable=None
-        )
+            watcher = Gio.DBusProxy.new_sync(
+                connection=self.bus,
+                flags=Gio.DBusProxyFlags.DO_NOT_LOAD_PROPERTIES,
+                info=None,
+                name='org.kde.StatusNotifierWatcher',
+                object_path='/StatusNotifierWatcher',
+                interface_name='org.kde.StatusNotifierWatcher',
+                cancellable=None
+            )
 
-        watcher.RegisterStatusNotifierItem('(s)', self.dbus_path)
+            watcher.RegisterStatusNotifierItem('(s)', self.dbus_path)
+            return True
+        except GLib.Error as e:
+            # StatusNotifierWatcher may not be available (e.g., no system tray)
+            # Clean up partial registration
+            try:
+                super().unregister()
+            except Exception:
+                pass
+            try:
+                self._menu.unregister()
+            except Exception:
+                pass
+            raise e
 
     def unregister(self):
         super().unregister()

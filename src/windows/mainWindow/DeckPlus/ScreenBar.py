@@ -108,14 +108,22 @@ class ScreenBar(Gtk.Frame):
         self.load_from_changes()
 
     def load_from_changes(self) -> None:
-        # Applt changes made before creation of self
+        # Apply changes made before creation of self
         if not hasattr(self.deck_controller, "ui_image_changes_while_hidden"):
             return
-        tasks = self.deck_controller.ui_image_changes_while_hidden
+        if not hasattr(self.deck_controller, "ui_image_changes_lock"):
+            return
 
-        if self.identifier in tasks:
-            self.image.set_image(tasks[self.identifier])
-            tasks.pop(self.identifier)
+        # Get the image to process with lock held
+        image_to_process = None
+        with self.deck_controller.ui_image_changes_lock:
+            tasks = self.deck_controller.ui_image_changes_while_hidden
+            if self.identifier in tasks:
+                image_to_process = tasks.pop(self.identifier)
+
+        # Process outside the lock to avoid holding it during UI updates
+        if image_to_process is not None:
+            self.image.set_image(image_to_process)
 
     def on_click(self, gesture, n_press, x, y):
         # print(f"Click: {self.parse_xy(x, y)}")

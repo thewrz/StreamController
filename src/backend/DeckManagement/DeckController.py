@@ -342,6 +342,7 @@ class DeckController:
         self.media_player_tasks: Queue[MediaPlayerTask] = Queue()
 
         self.ui_image_changes_while_hidden: dict = {}
+        self.ui_image_changes_lock = threading.Lock()  # Protects ui_image_changes_while_hidden
 
         self.active_page: Page = None
 
@@ -1972,12 +1973,13 @@ class ControllerKey(ControllerInput):
 
     def update(self):
         image = self.get_current_image()
-        
+
         # Handle transparency properly - composite RGBA onto RGB to preserve smooth edges
         if image.mode == "RGBA":
             rgb_background = Image.new("RGB", image.size, (0, 0, 0))
             rgb_background.paste(image, (0, 0), image)
             rgb_image = rgb_background.rotate(self.deck_controller.deck.get_rotation())
+            rgb_background.close()  # Close intermediate image
         else:
             rgb_image = image.convert("RGB").rotate(self.deck_controller.deck.get_rotation())
 
@@ -1985,8 +1987,10 @@ class ControllerKey(ControllerInput):
             native_image = PILHelper.to_native_key_format(self.deck_controller.deck, rgb_image)
             rgb_image.close()
             self.deck_controller.media_player.add_image_task(self.index, native_image)
+        else:
+            rgb_image.close()
 
-        del rgb_image
+        # Pass image to UI - the UI code will handle closing it after conversion to pixbuf
         self.set_ui_key_image(image)
 
     def get_active_state(self) -> "ControllerKeyState":
@@ -2046,18 +2050,22 @@ class ControllerKey(ControllerInput):
         background_color = self.get_active_state().background_manager.get_composed_color()
 
         background: Image.Image = None
+        background_color_img: Image.Image = None
         # Only load the background image if it's not gonna be hidden by the background color
         if background_color[-1] < 255:
             background = copy(self.deck_controller.background.tiles[self.index])
 
         if background_color[-1] > 0:
             background_color_img = Image.new("RGBA", self.deck_controller.get_key_image_size(), color=tuple(background_color))
-            
+
             if background is None:
                 # Use the color as the only background - happens if background color alpha is 255
                 background = background_color_img
+                background_color_img = None  # Transfer ownership to background
             else:
                 background.paste(background_color_img, (0, 0), background_color_img)
+                background_color_img.close()  # Close after pasting
+                background_color_img = None
 
 
         if background is None:
@@ -2067,10 +2075,12 @@ class ControllerKey(ControllerInput):
             height = round(self.deck_controller.get_key_image_size()[1]*0.75)
             img = state._overlay.resize((height, height))
             background.paste(img, (int((self.deck_controller.get_key_image_size()[0] - height) // 2), int((self.deck_controller.get_key_image_size()[1] - height) // 2)), img)
+            img.close()  # Close the resized overlay
             return background
 
 
         key_image: Image.Image = None
+        background_used_directly = False
         # rotation = self.deck_controller.get_deck_settings().get("rotation", {}).get("value", 0)
         if state.key_image is not None:
             image = state.key_image.get_raw_image()
@@ -2085,19 +2095,26 @@ class ControllerKey(ControllerInput):
                 background=background)
         else:
             key_image = background
+            background_used_directly = True
 
         labeled_image = state.label_manager.add_labels_to_image(key_image)
 
         if self.is_pressed():
+            old_labeled = labeled_image
             labeled_image = self.shrink_image(labeled_image)
+            if old_labeled is not labeled_image:
+                old_labeled.close()
 
         if self.has_unavailable_action() and not self.deck_controller.screen_saver.showing:
             labeled_image = self.add_warning_point(labeled_image)
 
-        if background is not None:
+        # Clean up intermediate images, being careful not to close images still in use
+        # key_image and background may be the same object, and labeled_image may reference them
+        if not background_used_directly and background is not None and background is not labeled_image:
             background.close()
 
-        key_image.close()
+        if key_image is not None and key_image is not background and key_image is not labeled_image:
+            key_image.close()
 
         return labeled_image
     
@@ -2127,19 +2144,19 @@ class ControllerKey(ControllerInput):
         return image
 
     def shrink_image(self, image: Image.Image, factor: float = 0.7) -> Image.Image:
-        image = image.copy()
         width = int(image.width * factor)
         height = int(image.height * factor)
-        image = image.resize((width, height))
+        # Resize directly without intermediate copy to avoid memory leak
+        resized_image = image.resize((width, height))
 
         background = Image.new("RGBA", self.deck_controller.get_key_image_size(), (0, 0, 0, 0))
 
-        if image.has_transparency_data:
-            background.paste(image, (int((self.deck_controller.get_key_image_size()[0] - width) / 2), int((self.deck_controller.get_key_image_size()[1] - height) / 2)), image)
+        if resized_image.has_transparency_data:
+            background.paste(resized_image, (int((self.deck_controller.get_key_image_size()[0] - width) / 2), int((self.deck_controller.get_key_image_size()[1] - height) / 2)), resized_image)
         else:
-            background.paste(image, (int((self.deck_controller.get_key_image_size()[0] - width) / 2), int((self.deck_controller.get_key_image_size()[1] - height) / 2)))
+            background.paste(resized_image, (int((self.deck_controller.get_key_image_size()[0] - width) / 2), int((self.deck_controller.get_key_image_size()[1] - height) / 2)))
 
-        image.close()
+        resized_image.close()
 
         return background
     
@@ -2266,17 +2283,18 @@ class ControllerKey(ControllerInput):
     def set_ui_key_image(self, image: Image.Image) -> None:
         if image is None:
             return
-        
+
         x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
 
         if self.deck_controller.get_own_key_grid() is None or not gl.app.main_win.get_mapped():
-            # Save to use later
-            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image # The ui key coords are in reverse order
+            # Save to use later - protected by lock for thread safety
+            with self.deck_controller.ui_image_changes_lock:
+                self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image
         else:
             try:
                 self.deck_controller.get_own_key_grid().buttons[x][y].set_image(image)
-            except:
-                print(f"Failed to set ui key image for {self.identifier}")
+            except Exception as e:
+                log.warning(f"Failed to set ui key image for {self.identifier}: {e}")
         
     def get_own_ui_key(self) -> KeyButton:
         x, y = ControllerKey.Index_To_Coords(self.deck_controller.deck, self.index)
@@ -2349,7 +2367,9 @@ class ControllerTouchScreen(ControllerInput):
             screenbar = self.deck_controller.own_deck_stack_child.page_settings.deck_config.screenbar
             screenbar.image.set_image(image)
         else:
-            self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image
+            # Protected by lock for thread safety
+            with self.deck_controller.ui_image_changes_lock:
+                self.deck_controller.ui_image_changes_while_hidden[self.identifier] = image
 
     def get_current_image(self) -> Image.Image:
         active_state = self.get_active_state()

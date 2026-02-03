@@ -31,7 +31,10 @@ from PIL import Image
 
 import gi
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Pango
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gdk, Pango, GLib
+
+from loguru import logger as log
 
 # Import globals
 from autostart import is_flatpak
@@ -429,3 +432,40 @@ def svg_to_pil(svg_path: str, width: int = 96, height: int = 96):
         return svg_string_to_pil(svg_path, width, height)
     else:
         raise ValueError(f"Could not create SVG from string or path: {svg_path}")
+
+
+def safe_idle_add(callback, *args, priority=GLib.PRIORITY_DEFAULT_IDLE, log_failures=True):
+    """
+    Safely schedule a callback to run on the GTK main loop.
+
+    This function wraps GLib.idle_add with additional error handling and logging.
+    It helps diagnose issues where UI updates fail silently because the main loop
+    isn't running or has stopped.
+
+    Args:
+        callback: The function to call on the main thread
+        *args: Arguments to pass to the callback
+        priority: GLib priority level (default: GLib.PRIORITY_DEFAULT_IDLE)
+        log_failures: Whether to log when the callback fails (default: True)
+
+    Returns:
+        int: The source ID of the scheduled callback, or 0 if scheduling failed
+    """
+    def wrapper():
+        try:
+            result = callback(*args)
+            return result if result is not None else False
+        except Exception as e:
+            if log_failures:
+                log.warning(f"Exception in idle callback {callback.__name__}: {e}")
+            return False
+
+    try:
+        source_id = GLib.idle_add(wrapper, priority=priority)
+        if source_id == 0 and log_failures:
+            log.warning(f"Failed to schedule idle callback {callback.__name__} - main loop may not be running")
+        return source_id
+    except Exception as e:
+        if log_failures:
+            log.warning(f"Exception scheduling idle callback {callback.__name__}: {e}")
+        return 0

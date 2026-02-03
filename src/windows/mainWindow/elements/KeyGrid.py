@@ -34,7 +34,7 @@ import globals as gl
 
 # Import own modules
 from src.backend.DeckManagement.ImageHelpers import image2pixbuf
-from src.backend.DeckManagement.HelperMethods import recursive_hasattr
+from src.backend.DeckManagement.HelperMethods import recursive_hasattr, safe_idle_add
 
 class KeyGrid(Gtk.Grid):
     """
@@ -83,20 +83,25 @@ class KeyGrid(Gtk.Grid):
         self.attach(l, 0, 0, 1, 1)
 
     def load_from_changes(self):
-        # Applt changes made before creation of self
+        # Apply changes made before creation of self
         if not hasattr(self.deck_controller, "ui_image_changes_while_hidden"):
             return
-        tasks = self.deck_controller.ui_image_changes_while_hidden
-        for identifier, image in list(tasks.items()):
-            if not isinstance(identifier, Input.Key):
-                continue
+        if not hasattr(self.deck_controller, "ui_image_changes_lock"):
+            return
+
+        # Get a snapshot of items to process with lock held
+        with self.deck_controller.ui_image_changes_lock:
+            tasks = self.deck_controller.ui_image_changes_while_hidden
+            items_to_process = [(identifier, image) for identifier, image in tasks.items()
+                                if isinstance(identifier, Input.Key)]
+            # Remove processed items
+            for identifier, _ in items_to_process:
+                tasks.pop(identifier, None)
+
+        # Process items outside the lock to avoid holding it during UI updates
+        for identifier, image in items_to_process:
             x, y = identifier.coords
             self.buttons[x][y].set_image(image)
-
-            try:
-                tasks.pop(identifier)
-            except KeyError:
-                pass
         
     def select_key(self, x: int, y: int):
         self.buttons[x][y].on_focus_in()
@@ -289,10 +294,14 @@ class KeyButton(Gtk.Frame):
 
     def set_image(self, image):
         self.pixbuf = image2pixbuf(image.convert("RGBA"), force_transparency=True)
-        GLib.idle_add(self.show_pixbuf, self.pixbuf, priority=GLib.PRIORITY_HIGH)
-        # image.close()
-        # image = None
-        # del image
+        # Use safe_idle_add to log failures and help diagnose UI update issues
+        safe_idle_add(self.show_pixbuf, self.pixbuf, priority=GLib.PRIORITY_HIGH)
+
+        # Close the PIL image after conversion to pixbuf to prevent memory leaks
+        try:
+            image.close()
+        except Exception:
+            pass  # Image may already be closed or invalid
 
         # update righthand side key preview if possible
         if recursive_hasattr(gl, "app.main_win.sidebar"):
@@ -311,8 +320,8 @@ class KeyButton(Gtk.Frame):
             return
         if child.deck_controller != self.key_grid.deck_controller:
             return
-        # Update icon selector on the top of the right are
-        GLib.idle_add(sidebar.key_editor.icon_selector.set_pixbuf_and_del, pixbuf, priority=GLib.PRIORITY_HIGH)
+        # Update icon selector on the top of the right area
+        safe_idle_add(sidebar.key_editor.icon_selector.set_pixbuf_and_del, pixbuf, priority=GLib.PRIORITY_HIGH)
         # Update icon selector in margin editor
         # GLib.idle_add(sidebar.key_editor.image_editor.image_group.expander.margin_row.icon_selector.image.set_from_pixbuf, pixbuf)
 

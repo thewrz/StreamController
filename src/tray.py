@@ -1,12 +1,19 @@
 import os
+import threading
+import time
 from loguru import logger as log
 import globals as gl
 from src.backend.trayicon import DBusTrayIcon, DBusMenu
+from gi.repository import GLib
 
 class TrayIcon(DBusTrayIcon):
     MenuPath = "/com/core447/StreamController/Menu"
     IndicatorPath = "/org/ayatana/NotificationItem/com_core447_StreamController_TrayIcon"
     AppId = "com.core447.StreamController.TrayIcon"
+
+    # Retry settings for tray icon registration
+    MAX_RETRIES = 5
+    RETRY_DELAY_SECONDS = 2
 
     def __init__(self):
         if gl.IS_MAC:
@@ -30,6 +37,9 @@ class TrayIcon(DBusTrayIcon):
         self.show_settings_action = None
         self.quit_app_action = None
         self.activate_id = -1
+        self._is_registered = False
+        self._registration_thread = None
+        self._stop_retry = False
 
     @log.catch
     def initialize(self, main_win):
@@ -41,15 +51,72 @@ class TrayIcon(DBusTrayIcon):
         app_settings = gl.settings_manager.get_app_settings()
         show_now = app_settings.get("ui",{}).get("tray-icon", True)
         if show_now:
-            self.register()
+            self._register_with_retry()
+
+    def _register_with_retry(self):
+        """Register tray icon with retry logic in a background thread."""
+        if self._is_registered:
+            return
+
+        self._stop_retry = False
+        self._registration_thread = threading.Thread(
+            target=self._do_register_with_retry,
+            name="tray_icon_registration",
+            daemon=True
+        )
+        self._registration_thread.start()
+
+    def _do_register_with_retry(self):
+        """Attempt to register the tray icon with retries."""
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            if self._stop_retry:
+                log.debug("Tray icon registration cancelled")
+                return
+
+            try:
+                # Use GLib.idle_add to register on the main thread
+                result = [None]
+                event = threading.Event()
+
+                def do_register():
+                    try:
+                        self.register()
+                        result[0] = True
+                    except Exception as e:
+                        result[0] = e
+                    event.set()
+                    return False  # Don't repeat
+
+                GLib.idle_add(do_register)
+                event.wait(timeout=10)
+
+                if result[0] is True:
+                    self._is_registered = True
+                    log.info("Tray icon registered successfully")
+                    return
+                elif isinstance(result[0], Exception):
+                    raise result[0]
+
+            except Exception as e:
+                log.warning(f"Failed to register tray icon (attempt {attempt}/{self.MAX_RETRIES}): {e}")
+                if attempt < self.MAX_RETRIES:
+                    time.sleep(self.RETRY_DELAY_SECONDS)
+
+        log.error("Failed to register tray icon after all retries. System tray may not be available.")
 
     @log.catch
     def start(self):
-        self.register()
+        self._register_with_retry()
 
     @log.catch
     def stop(self):
-        self.unregister()
+        self._stop_retry = True
+        if self._is_registered:
+            try:
+                self.unregister()
+                self._is_registered = False
+            except Exception as e:
+                log.warning(f"Error unregistering tray icon: {e}")
 
     @log.catch
     def on_show(self):
