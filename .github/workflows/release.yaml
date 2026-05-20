@@ -9,8 +9,8 @@ jobs:
       version: ${{ steps.semrel.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v3
-      - uses: go-semantic-release/action@v1
+      - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3.6.0
+      - uses: go-semantic-release/action@2e9dc4247a6004f8377781bef4cb9dad273a741f # v1.24.1
         id: semrel
         name: Release
         with:
